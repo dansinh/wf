@@ -303,6 +303,9 @@ class_metrics <- metric_set(
 loan_predictions |> class_metrics(truth = loan_status, estimate = pred_loan_status)
 conf_mat(loan_predictions, truth = loan_status, estimate = pred_loan_status)
 
+# 4.4 Save workspace
+save.image(file = "wf_model_screening.RData")
+
 
 
 
