@@ -4,7 +4,7 @@
 # 1.1 Upload packages
 pacman::p_load(
   tidyverse, tidymodels, textrecipes, text2vec, stringr,
-  doMC, ranger, xgboost, lightgbm, bonsai, finetune,
+  doMC, ranger, xgboost, lightgbm, bonsai, finetune, themis,
   janitor, skimr, ggthemes, ggsci, gt, gtExtras
 )
 
@@ -86,7 +86,7 @@ df <- read_csv("loan_data.csv") |>
     ),
     months_since_first_credit = interval(min_date_credit_line, today()) %/% months(1)
   ) |>
-  select(-c(min_date_credit_line, loan_status, residence_state)) |>
+  select(-c(min_date_credit_line, residence_state)) |>
   mutate(across(.cols = where(is.character), .fns = factor))
 
 #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -94,12 +94,8 @@ df <- read_csv("loan_data.csv") |>
 #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 # 3.1 Data budgeting with case weights
 set.seed(1)
-df_split <- initial_split(data = df, prop = 0.8)
-df_train <- training(df_split) |>
-  mutate(
-    case_wts = ifelse(is_bad_loan == "1", 23, 1),
-    case_wts = importance_weights(case_wts)
-  )
+df_split <- initial_split(data = df, prop = 0.8, strata = is_bad_loan)
+df_train <- training(df_split)
 df_test <- testing(df_split)
 df_folds <- vfold_cv(data = df_train, v = 5)
 
@@ -118,11 +114,11 @@ cumu_pct(data = df_train, threshold = 100, purpose)
 # 3.2 Recipe set
 recipe_listing <- function() {
   base_recipe <- recipe(
-    is_bad_loan ~ loan_amount + purpose + term + interest_rate + installment +
-      case_wts,
+    is_bad_loan ~ loan_amount + purpose + term + interest_rate + installment,
     data = df_train
   ) |>
     step_other(purpose, threshold = 0.05) |>
+    step_rose(is_bad_loan, over_ratio = 24) |>
     step_dummy(all_nominal_predictors()) |>
     step_novel(all_nominal_predictors()) |>
     step_normalize(all_numeric_predictors()) |>
@@ -130,13 +126,13 @@ recipe_listing <- function() {
   
   mid_recipe <- recipe(
     is_bad_loan ~ loan_amount + purpose + term + interest_rate + installment +
-      case_wts +
       delinquency_2years + months_since_delinquency +
       months_since_first_credit + revolving_balance +
       open_accounts + total_accounts,
     data = df_train
   ) |>
     step_other(purpose, threshold = 0.05) |>
+    step_rose(is_bad_loan, over_ratio = 24) |>
     step_dummy(all_nominal_predictors()) |>
     step_novel(all_nominal_predictors()) |>
     step_normalize(all_numeric_predictors()) |>
@@ -144,7 +140,6 @@ recipe_listing <- function() {
   
   full_recipe <- recipe(
     is_bad_loan ~ loan_amount + purpose + term + interest_rate + installment +
-      case_wts +
       delinquency_2years + months_since_delinquency +
       months_since_first_credit + revolving_balance +
       open_accounts + total_accounts +
@@ -153,6 +148,7 @@ recipe_listing <- function() {
   ) |>
     step_impute_mean(employment_length) |>
     step_other(purpose, threshold = 0.05) |>
+    step_rose(is_bad_loan, over_ratio = 24) |>
     step_dummy(all_nominal_predictors()) |>
     step_novel(all_nominal_predictors()) |>
     step_normalize(all_numeric_predictors()) |>
@@ -171,7 +167,7 @@ model_listing <- function() {
   glm_spec <- logistic_reg(penalty = 0) |>
       set_engine("glm") |>
       set_mode("classification")
-  
+
   rf_spec <- rand_forest(trees = 1000) |>
     set_engine("ranger") |>
     set_mode("classification")
@@ -180,7 +176,11 @@ model_listing <- function() {
     set_engine("xgboost") |>
     set_mode("classification")
   
-  models = list(glm_spec, rf_spec, xgb_spec)
+  lightgbm_spec <- boost_tree(trees = 1000) |>
+    set_engine("lightgbm") |>
+    set_mode("classification")
+  
+  models = list(glm_spec, rf_spec, xgb_spec, lightgbm_spec)
   return(models)
 }
 
@@ -188,8 +188,7 @@ model_listing <- function() {
 wf_set <- workflow_set(
   preproc = recipe_listing(),
   models = model_listing(),
-  cross = TRUE,
-  case_weights = case_wts
+  cross = TRUE
 )
 
 # 3.5 Workflows evaluation
@@ -199,7 +198,7 @@ class_metrics <- wf_set |>
     fn = "fit_resamples",
     resamples = df_folds,
     seed = 1, verbose = TRUE,
-    metrics = metric_set(mn_log_loss, precision, recall),
+    metrics = metric_set(j_index, spec, sens, mn_log_loss),
     control = control_resamples(
       save_pred = FALSE,
       save_workflow = FALSE,
@@ -208,8 +207,88 @@ class_metrics <- wf_set |>
   )
 registerDoSEQ()
 
-cumu_pct(data = data, threshold = 100, purpose)
+collect_metrics(class_metrics) |>
+  select(wflow_id, .metric, mean) |>
+  mutate(across(where(is.numeric), \(x) round(x, 3))) |>
+  pivot_wider(id_cols = wflow_id, names_from = .metric, values_from = mean) |>
+  arrange(desc(j_index)) |>
+  select(wflow_id, j_index, spec, sens, mn_log_loss) |>
+  rename(
+    `Recipe/Model Combo` = wflow_id,
+    `J-Index` = j_index,
+    `Log Loss` = mn_log_loss,
+    `Specificity` = spec,
+    `Sensitivity` = sens
+  ) |>
+  gt() |> gt_theme_538() |>
+  tab_header(
+    title = 'Loan Classification Model Screening',
+    subtitle = "5-fold CV on training set."
+  )
 
+#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+# 4. Final Model Evaluation
+#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+full_recipe <- recipe(
+  is_bad_loan ~ loan_amount + purpose + term + interest_rate + installment +
+    case_wts +
+    delinquency_2years + months_since_delinquency +
+    months_since_first_credit + revolving_balance +
+    open_accounts + total_accounts +
+    annual_income + dti + employment_length + home_ownership,
+  data = df_train
+) |>
+  step_impute_mean(employment_length) |>
+  step_other(purpose, threshold = 0.05) |>
+  step_dummy(all_nominal_predictors()) |>
+  step_novel(all_nominal_predictors()) |>
+  step_normalize(all_numeric_predictors()) |>
+  step_zv(all_predictors())
+
+base_recipe <- recipe(
+  is_bad_loan ~ loan_amount + purpose + term + interest_rate + installment +
+    case_wts,
+  data = df_train
+) |>
+  step_other(purpose, threshold = 0.05) |>
+  step_dummy(all_nominal_predictors()) |>
+  step_novel(all_nominal_predictors()) |>
+  step_normalize(all_numeric_predictors()) |>
+  step_zv(all_predictors())
+
+rf_spec <- rand_forest(trees = 1000) |>
+  set_engine("ranger") |>
+  set_mode("classification")
+
+xgb_spec <- boost_tree(trees = 1000) |>
+  set_engine("xgboost") |>
+  set_mode("classification")
+
+registerDoMC(cores = detectCores())
+class_predictions <- workflow() |>
+  add_recipe(base_recipe) |>
+  add_model(rf_spec) |>
+  add_case_weights(case_wts) |>
+  fit(df_train) |>
+  predict(df_test, type = "prob") |>
+  rename(good_loan_prob = .pred_0, bad_loan_prob = .pred_1)
+registerDoSEQ()
+
+results <- df_test |> bind_cols(class_predictions) |>
+  select(
+    customer_id, loan_amount, loan_status,
+    is_bad_loan, bad_loan_prob, good_loan_prob
+  ) |>
+  mutate(
+    pred_bad_loan = if_else(bad_loan_prob >= 0.5, 1, 0),
+    pred_bad_loan = factor(pred_bad_loan)
+  )
+
+results |> summary()
+precision(results, truth = is_bad_loan, estimate = pred_bad_loan)
+recall(results, truth = is_bad_loan, estimate = pred_bad_loan)
+conf_mat(results, truth = is_bad_loan, estimate = pred_bad_loan)
+results
 data |> count(purpose, sort = TRUE) |>
   mutate(percent = 100 * n / sum(n)) |>
   arrange(desc(percent)) |>
