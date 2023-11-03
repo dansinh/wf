@@ -79,6 +79,9 @@ df = (
                 pd.to_datetime(pd.Timestamp.today())
             ).astype('datetime64[ns]')
     )
+    .assign(
+        months_since_first_credit = lambda df_:
+            ((pd.to_datetime('today') - df_.min_date_credit_line) / np.timedelta64(1, 'M'))
+    )
     .dropna()
 )
-
