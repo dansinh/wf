@@ -3,8 +3,8 @@
 #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 # 1.1 Upload packages
 pacman::p_load(
-  tidyverse, tidymodels, textrecipes, text2vec, stringr,
-  doMC, ranger, xgboost, lightgbm, bonsai, finetune, themis,
+  tidyverse, tidymodels,
+  doMC, ranger, xgboost, lightgbm, probably, themis,
   janitor, skimr, ggthemes, ggsci, gt, gtExtras
 )
 
@@ -54,16 +54,16 @@ df <- read_csv("loan_data.csv") |>
   ) |>
   filter(!is.na(term)) |>
   mutate(
-    is_bad_loan = case_when(
-      loan_status == "Charged Off" ~ 1,
-      loan_status == "Default" ~ 1,
-      loan_status == "Late (16-30 days)" ~ 1,
-      loan_status == "Late (31-120 days)" ~ 1,
-      loan_status == "Current" ~ 0,
-      loan_status == "Fully Paid" ~ 0,
-      loan_status == "In Grace Period" ~ 0
+    loan_status = case_when(
+      loan_status == "Charged Off" ~ "bad",
+      loan_status == "Default" ~ "bad",
+      loan_status == "Late (16-30 days)" ~ "bad",
+      loan_status == "Late (31-120 days)" ~ "bad",
+      loan_status == "In Grace Period" ~ "bad",
+      loan_status == "Current" ~ "good",
+      loan_status == "Fully Paid" ~ "good"
     ),
-    is_bad_loan = factor(is_bad_loan),
+    loan_status = factor(loan_status),
     customer_id = factor(customer_id),
     months_since_delinquency = if_else(
       is.na(months_since_delinquency),
@@ -72,8 +72,7 @@ df <- read_csv("loan_data.csv") |>
     employment_length = parse_number(employment_length),
     employment_length= if_else(
       is.na(employment_length),
-      mean(employment_length),
-      employment_length
+      1, employment_length
     ),
     home_ownership = case_when(
       home_ownership == "RENT" ~ "rent",
@@ -94,14 +93,14 @@ df <- read_csv("loan_data.csv") |>
 #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 # 3.1 Data budgeting with case weights
 set.seed(1)
-df_split <- initial_split(data = df, prop = 0.8, strata = is_bad_loan)
+df_split <- initial_split(data = df, prop = 0.8, strata = loan_status)
 df_train <- training(df_split)
 df_test <- testing(df_split)
 df_folds <- vfold_cv(data = df_train, v = 5)
 
 # Proportion of bad loans (4.1%)
 df_train |>
-  count(is_bad_loan) |>
+  count(loan_status) |>
   adorn_totals(where = c("col")) |>
   mutate(pct = 100 * n / sum(n)) |>
   mutate(across(.cols = where(is.numeric), .fns = \(x) round(x, 1))) |>
@@ -114,41 +113,40 @@ cumu_pct(data = df_train, threshold = 100, purpose)
 # 3.2 Recipe set
 recipe_listing <- function() {
   base_recipe <- recipe(
-    is_bad_loan ~ loan_amount + purpose + term + interest_rate + installment,
+    loan_status ~ loan_amount + purpose + term + interest_rate + installment,
     data = df_train
   ) |>
-    step_other(purpose, threshold = 0.05) |>
-    step_rose(is_bad_loan, over_ratio = 24) |>
+    step_other(purpose, other = "rest", threshold = 0.01) |>
+    step_rose(loan_status, over_ratio = 1) |>
     step_dummy(all_nominal_predictors()) |>
     step_novel(all_nominal_predictors()) |>
     step_normalize(all_numeric_predictors()) |>
     step_zv(all_predictors())
   
   mid_recipe <- recipe(
-    is_bad_loan ~ loan_amount + purpose + term + interest_rate + installment +
+    loan_status ~ loan_amount + purpose + term + interest_rate + installment +
       delinquency_2years + months_since_delinquency +
       months_since_first_credit + revolving_balance +
       open_accounts + total_accounts,
     data = df_train
   ) |>
-    step_other(purpose, threshold = 0.05) |>
-    step_rose(is_bad_loan, over_ratio = 24) |>
+    step_other(purpose, other = "rest", threshold = 0.01) |>
+    step_rose(loan_status, over_ratio = 1) |>
     step_dummy(all_nominal_predictors()) |>
     step_novel(all_nominal_predictors()) |>
     step_normalize(all_numeric_predictors()) |>
     step_zv(all_predictors())
   
   full_recipe <- recipe(
-    is_bad_loan ~ loan_amount + purpose + term + interest_rate + installment +
+    loan_status ~ loan_amount + purpose + term + interest_rate + installment +
       delinquency_2years + months_since_delinquency +
       months_since_first_credit + revolving_balance +
       open_accounts + total_accounts +
       annual_income + dti + employment_length + home_ownership,
     data = df_train
   ) |>
-    step_impute_mean(employment_length) |>
-    step_other(purpose, threshold = 0.05) |>
-    step_rose(is_bad_loan, over_ratio = 24) |>
+    step_other(purpose, other = "rest", threshold = 0.01) |>
+    step_rose(loan_status, over_ratio = 1) |>
     step_dummy(all_nominal_predictors()) |>
     step_novel(all_nominal_predictors()) |>
     step_normalize(all_numeric_predictors()) |>
@@ -198,7 +196,10 @@ class_metrics <- wf_set |>
     fn = "fit_resamples",
     resamples = df_folds,
     seed = 1, verbose = TRUE,
-    metrics = metric_set(j_index, spec, sens, mn_log_loss),
+    metrics = metric_set(
+      j_index, spec, sens, mn_log_loss,
+      f_meas, precision, recall
+    ),
     control = control_resamples(
       save_pred = FALSE,
       save_workflow = FALSE,
@@ -209,90 +210,105 @@ registerDoSEQ()
 
 collect_metrics(class_metrics) |>
   select(wflow_id, .metric, mean) |>
-  mutate(across(where(is.numeric), \(x) round(x, 3))) |>
+  mutate(across(where(is.numeric), \(x) round(x, 2))) |>
   pivot_wider(id_cols = wflow_id, names_from = .metric, values_from = mean) |>
   arrange(desc(j_index)) |>
-  select(wflow_id, j_index, spec, sens, mn_log_loss) |>
+  select(
+    wflow_id, j_index, spec, sens,
+    precision, recall, f_meas, mn_log_loss
+  ) |>
   rename(
     `Recipe/Model Combo` = wflow_id,
     `J-Index` = j_index,
     `Log Loss` = mn_log_loss,
     `Specificity` = spec,
-    `Sensitivity` = sens
+    `Sensitivity` = sens,
+    `Precision` = precision,
+    `Recall` = recall,
+    `F1 Score` = f_meas
   ) |>
   gt() |> gt_theme_538() |>
   tab_header(
-    title = 'Loan Classification Model Screening',
-    subtitle = "5-fold CV on training set."
+    title = 'Loan Classification - Model Screening',
+    subtitle = "5-fold CV on training set (80%)"
   )
 
 #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 # 4. Final Model Evaluation
 #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+# 4.1 Logistic model predictions
 full_recipe <- recipe(
-  is_bad_loan ~ loan_amount + purpose + term + interest_rate + installment +
-    case_wts +
+  loan_status ~ loan_amount + purpose + term + interest_rate + installment +
     delinquency_2years + months_since_delinquency +
     months_since_first_credit + revolving_balance +
     open_accounts + total_accounts +
     annual_income + dti + employment_length + home_ownership,
   data = df_train
 ) |>
-  step_impute_mean(employment_length) |>
-  step_other(purpose, threshold = 0.05) |>
+  step_other(purpose, other = "rest", threshold = 0.01) |>
+  step_rose(loan_status, over_ratio = 1) |>
   step_dummy(all_nominal_predictors()) |>
   step_novel(all_nominal_predictors()) |>
   step_normalize(all_numeric_predictors()) |>
   step_zv(all_predictors())
 
-base_recipe <- recipe(
-  is_bad_loan ~ loan_amount + purpose + term + interest_rate + installment +
-    case_wts,
-  data = df_train
-) |>
-  step_other(purpose, threshold = 0.05) |>
-  step_dummy(all_nominal_predictors()) |>
-  step_novel(all_nominal_predictors()) |>
-  step_normalize(all_numeric_predictors()) |>
-  step_zv(all_predictors())
-
-rf_spec <- rand_forest(trees = 1000) |>
-  set_engine("ranger") |>
+glm_spec <- logistic_reg(penalty = 0) |>
+  set_engine("glm") |>
   set_mode("classification")
 
-xgb_spec <- boost_tree(trees = 1000) |>
-  set_engine("xgboost") |>
-  set_mode("classification")
-
-registerDoMC(cores = detectCores())
-class_predictions <- workflow() |>
-  add_recipe(base_recipe) |>
-  add_model(rf_spec) |>
-  add_case_weights(case_wts) |>
+test_pred <- workflow() |>
+  add_recipe(full_recipe) |>
+  add_model(glm_spec) |>
   fit(df_train) |>
-  predict(df_test, type = "prob") |>
-  rename(good_loan_prob = .pred_0, bad_loan_prob = .pred_1)
-registerDoSEQ()
+  predict(df_test, type = "prob")
 
-results <- df_test |> bind_cols(class_predictions) |>
-  select(
-    customer_id, loan_amount, loan_status,
-    is_bad_loan, bad_loan_prob, good_loan_prob
-  ) |>
-  mutate(
-    pred_bad_loan = if_else(bad_loan_prob >= 0.5, 1, 0),
-    pred_bad_loan = factor(pred_bad_loan)
+loan_predictions <- df_test |> bind_cols(test_pred) |>
+  select(customer_id, loan_amount, loan_status, .pred_bad, .pred_good)
+
+# 4.2 Post-prediction optimization
+thresholds <- loan_predictions |>
+  threshold_perf(
+    loan_status, .pred_bad,
+    thresholds = seq(0.5, 0.75, by = 0.005)
   )
 
-results |> summary()
-precision(results, truth = is_bad_loan, estimate = pred_bad_loan)
-recall(results, truth = is_bad_loan, estimate = pred_bad_loan)
-conf_mat(results, truth = is_bad_loan, estimate = pred_bad_loan)
-results
-data |> count(purpose, sort = TRUE) |>
-  mutate(percent = 100 * n / sum(n)) |>
-  arrange(desc(percent)) |>
-  mutate(cumu_percent = cumsum(percent))
+max_jindex_threshold <- thresholds |>
+  filter(.metric == "j_index") |>
+  filter(.estimate == max(.estimate)) |>
+  pull(.threshold)
+
+thresholds |>
+  ggplot(aes(x = .threshold, y = .estimate, color = .metric)) +
+  geom_line(linewidth = 1) +
+  geom_vline(
+    xintercept = max_jindex_threshold,
+    alpha = 1, color = "slateblue", linewidth = 0.8
+  ) +
+  scale_color_uchicago() +
+  labs(
+    y = "Metric estimate", x = "Threshold",
+    title = "Balance Performance by Varying Threshold"
+  )
+
+# 4.3 Final predictions
+loan_predictions <- loan_predictions |>
+  mutate(
+    pred_loan_status = if_else(.pred_bad >= 0.55, "bad", "good"),
+    pred_loan_status = factor(pred_loan_status)
+  )
+
+class_metrics <- metric_set(
+  j_index, sensitivity, specificity, precision, recall
+)
+loan_predictions |> class_metrics(truth = loan_status, estimate = pred_loan_status)
+conf_mat(loan_predictions, truth = loan_status, estimate = pred_loan_status)
+
+
+
+
+
+
+
 
 # How many individuals/id's: 10k distinct
 data |> summarize(n = n(), .by = id) |>
