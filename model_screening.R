@@ -86,12 +86,126 @@ data <- read_csv("loan_data.csv") |>
     ),
     months_since_first_credit = interval(min_date_credit_line, today()) %/% months(1)
   ) |>
-  select(-c(min_date_credit_line, loan_status)) |>
+  select(-c(min_date_credit_line, loan_status, residence_state)) |>
   mutate(across(.cols = where(is.character), .fns = factor))
 
 data |> skim()
-data |> count(purpose)
-data |> count(is_bad_loan)
+
+#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+# 3. Loan Classification Models
+#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+# 3.1 Data budgeting with case weights
+set.seed(1)
+df_split <- initial_split(data = data, prop = 0.8)
+df_train <- training(df_split) |>
+  mutate(
+    case_wts = ifelse(is_bad_loan == "1", 23, 1),
+    case_wts = importance_weights(case_wts)
+  )
+df_test <- testing(df_split)
+df_folds <- vfold_cv(data = df_train, v = 5)
+
+# Proportion of bad loans (4.1%)
+df_train |>
+  count(is_bad_loan) |>
+  adorn_totals(where = c("col")) |>
+  mutate(pct = 100 * n / sum(n)) |>
+  mutate(across(.cols = where(is.numeric), .fns = \(x) round(x, 1))) |>
+  select(-Total) |>
+  gt() |> gt_theme_538()
+
+# Distribution of loan purposes
+cumu_pct(data = df_train, threshold = 100, purpose)
+
+# 3.2 Recipe set
+recipe_listing <- function(data) {
+  base_recipe <- recipe(
+    is_bad_loan ~ loan_amount + purpose + term + interest_rate + installment,
+    data = data
+  ) |>
+    step_other(purpose, threshold = 0.05) |>
+    step_dummy(all_nominal_predictors()) |>
+    step_novel(all_nominal_predictors()) |>
+    step_normalize(all_numeric_predictors()) |>
+    step_zv(all_predictors())
+  
+  mid_recipe <- recipe(
+    is_bad_loan ~ loan_amount + purpose + term + interest_rate + installment +
+      delinquency_2years + months_since_delinquency +
+      months_since_first_credit + revolving_balance +
+      open_accounts + total_accounts,
+    data = data
+  ) |>
+    step_other(purpose, threshold = 0.05) |>
+    step_dummy(all_nominal_predictors()) |>
+    step_novel(all_nominal_predictors()) |>
+    step_normalize(all_numeric_predictors()) |>
+    step_zv(all_predictors())
+  
+  full_recipe <- recipe(
+    is_bad_loan ~ loan_amount + purpose + term + interest_rate + installment +
+      delinquency_2years + months_since_delinquency +
+      months_since_first_credit + revolving_balance +
+      open_accounts + total_accounts +
+      annual_income + dti + employment_length + home_ownership,
+    data = data
+  ) |>
+    step_impute_mode(employment_length) |>
+    step_other(purpose, threshold = 0.05) |>
+    step_dummy(all_nominal_predictors()) |>
+    step_novel(all_nominal_predictors()) |>
+    step_normalize(all_numeric_predictors()) |>
+    step_zv(all_predictors())
+  
+  preproc <- list(
+    base_recipe = base_recipe,
+    mid_recipe = mid_recipe,
+    full_recipe = full_recipe
+  )
+  return(preproc)
+}
+
+# 3.3 Model set
+model_listing <- function() {
+  glm_spec <- logistic_reg(penalty = 0) |>
+      set_engine("glm") |>
+      set_mode("classification")
+  
+  rf_spec <- rand_forest(trees = 1000) |>
+    set_engine("ranger") |>
+    set_mode("classification")
+  
+  xgb_spec <- boost_tree(trees = 1000) |>
+    set_engine("xgboost") |>
+    set_mode("classification")
+  
+  models = list(glm_spec, rf_spec, xgb_spec)
+  return(models)
+}
+
+# 3.4 Workflow set
+wf_set <- workflow_set(
+  preproc = recipe_listing(data = df_train),
+  models = model_listing(),
+  cross = TRUE,
+  case_weights = case_weights
+)
+
+# 3.5 Workflows evaluation
+registerDoMC(cores = detectCores())
+class_metrics <- wf_set |>
+  workflow_map(
+    fn = "fit_resamples",
+    resamples = df_folds,
+    seed = 1, verbose = TRUE,
+    metrics = metric_set(mn_log_loss, precision, recall),
+    control = control_resamples(
+      save_pred = FALSE,
+      save_workflow = FALSE,
+      parallel_over = "everything"
+    )
+  )
+registerDoSEQ()
 
 cumu_pct(data = data, threshold = 100, purpose)
 
