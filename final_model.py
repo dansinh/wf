@@ -3,7 +3,6 @@
 #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 import numpy as np
 import pandas as pd
-from datetime import datetime
 
 from sklearn.preprocessing import StandardScaler, OneHotEncoder
 from sklearn.feature_selection import VarianceThreshold
@@ -11,11 +10,15 @@ from sklearn.compose import ColumnTransformer
 from sklearn.pipeline import make_pipeline
 from sklearn.model_selection import train_test_split
 from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import jaccard_score, log_loss, recall_score, precision_score
+from sklearn.metrics import (
+    confusion_matrix, ConfusionMatrixDisplay,
+    recall_score, precision_score, jaccard_score
+)
 
 #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 # 1. Data
 #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
 cols = [
     "id", "loan_amnt", "loan_status",
     "term", "int_rate", "installment", "emp_length",
@@ -121,21 +124,19 @@ df = (
 # 2.1 Data budgeting
 target = 'loan_status'
 features = df.columns.drop(['customer_id', 'loan_status'])
+cat_features = ['term', 'home_ownership', 'purpose']
+num_features = features.drop(cat_features)
+
 X_train, X_test, y_train, y_test = train_test_split(
     df[features], df[target],
-    test_size = 0.2, random_state = 1
+    test_size = 0.2, random_state = 1, stratify = df[target]
 )
-
-df.info()
 
 # 2.2 Feature pipeline
-cat_features = ['term', 'home_ownership', 'purpose']
 cat_transformer = make_pipeline(
-    OneHotEncoder(handle_unknown = "ignore"),
-    VarianceThreshold(0.0)
+    OneHotEncoder(handle_unknown = "ignore"), VarianceThreshold(0.0)
 )
 
-num_features = features.drop(cat_features)
 num_transformer = make_pipeline(
     VarianceThreshold(0.0), StandardScaler()
 )
@@ -145,11 +146,40 @@ logistic_model = make_pipeline(
         ('categorical', cat_transformer, cat_features),
         ('numeric', num_transformer, num_features)
     ]),
-    LogisticRegression(penalty = "none", max_iter = 1000)
+    LogisticRegression(
+        penalty = "none",
+        max_iter = 1000,
+        class_weight = 'balanced'
+    )
 )
 
-# 2.3 Model predictions
-logistic_model.fit(X_train, y_train)
-bad_loan_prob = logistic_model.predict_proba(X_test)[:, 0]
-good_loan_prob = logistic_model.predict_proba(X_test)[:, 1]
-y_pred = logistic_model.predict(X_test)
+sm = SMOTENC(
+    categorical_features = cat_features,
+    categorical_encoder = OneHotEncoder(),
+    random_state = 1, sampling_strategy = 1
+)
+X_train_res, y_train_res = sm.fit_resample(X_train, y_train)
+logistic_model.fit(X_train_res, y_train_res)
+
+#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+# 3. Prediction evaluation
+#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+ConfusionMatrixDisplay.from_estimator(logistic_model, X_test, y_test).plot()
+
+jaccard_score(
+    y_pred = logistic_model.predict(X_test),
+    y_true = y_test.values,
+    pos_label = 'bad'
+)
+
+precision_score(
+    y_pred = y_pred,
+    y_true = y_test.values,
+    pos_label = 'bad'
+)
+
+recall_score(
+    y_pred = y_pred,
+    y_true = y_test.values,
+    pos_label = 'bad'
+)
