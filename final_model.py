@@ -3,6 +3,7 @@
 #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 import numpy as np
 import pandas as pd
+import matplotlib.pyplot as plt
 import pickle
 
 from imblearn.over_sampling import SMOTENC
@@ -124,7 +125,7 @@ df = prep_data(pd.read_csv("loan_data.csv"))
 #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 # 2. Models
 #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-# 2.1 Data budgeting
+# 3.1 Data budgeting
 target = 'loan_status'
 features = df.columns.drop(['customer_id', 'loan_status'])
 cat_features = ['term', 'home_ownership', 'purpose']
@@ -135,7 +136,7 @@ X_train, X_test, y_train, y_test = train_test_split(
     test_size = 0.2, random_state = 1, stratify = df[target]
 )
 
-# 2.2 Feature pipeline
+# 3.2 Feature pipeline
 cat_transformer = make_pipeline(
     OneHotEncoder(handle_unknown = "ignore"),
     VarianceThreshold(0.0)
@@ -165,10 +166,11 @@ sm = SMOTENC(
 )
 X_train_res, y_train_res = sm.fit_resample(X_train, y_train)
 
-# 2.3 Model prediction and evaluation
+# 3.3 Model prediction and evaluation
 logistic_model.fit(X_train_res, y_train_res)
 y_pred = logistic_model.predict(X_test)
 ConfusionMatrixDisplay.from_estimator(logistic_model, X_test, y_test)
+plt.show()
 
 # bad = 0 (negative), good = 1 (positive)
 target_names = ['bad', 'good']
@@ -176,6 +178,8 @@ print(classification_report(
     y_true = y_test.values, y_pred = y_pred, target_names = target_names
 ))
 
-# 2.4 Final pickled model
-with open("logistic_model_saved.pickle", "wb") as file:
-    pickle.dump(logistic_model, file)
+# 2.4 Final pickled model trained on all data
+X, y = sm.fit_resample(df[features], df[target])
+final_model = logistic_model.fit(X, y)
+with open("final_model_saved.pickle", "wb") as file:
+    pickle.dump(final_model, file)
