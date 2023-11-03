@@ -5,11 +5,12 @@ import numpy as np
 import pandas as pd
 from datetime import datetime
 
-from sklearn.preprocessing import StandardScaler, FunctionTransformer, SplineTransformer
+from sklearn.preprocessing import StandardScaler, OneHotEncoder
 from sklearn.feature_selection import VarianceThreshold
 from sklearn.compose import ColumnTransformer
 from sklearn.pipeline import make_pipeline
 from sklearn.model_selection import train_test_split
+from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import jaccard_score, log_loss, recall_score, precision_score
 
 #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -60,6 +61,21 @@ df = (
             'OWN': 'own',
             'OTHER': 'mortgage',
             'NONE': 'mortgage' 
+        }).astype('category'),
+        purpose = lambda df_: df_.purpose.replace({
+            'debt_consolidation': 'debt_consolidation',
+            'credit_card': 'credit_card',
+            'home_improvement': 'home_improvement',
+            'other': 'other',
+            'major_purchase': 'other',
+            'small_business': 'other',
+            'car': 'other',
+            'medical': 'other',
+            'wedding': 'other',
+            'house': 'other',
+            'moving': 'other',
+            'vacation': 'other',
+            'renewable_energy': 'other'
         }).astype('category')
     )
     .assign(
@@ -95,10 +111,45 @@ df = (
         open_account_ratio = lambda df_: df_.open_accounts / df_.total_accounts,
         total_earnings = lambda df_: df_.employment_length * df_.annual_income
     )
+    .drop(columns = ['min_date_credit_line'])
     .dropna()
 )
 
 #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 # 2. Model
 #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+# 2.1 Data budgeting
+target = 'loan_status'
+features = df.columns.drop(['customer_id', 'loan_status'])
+X_train, X_test, y_train, y_test = train_test_split(
+    df[features], df[target],
+    test_size = 0.2, random_state = 1
+)
+
 df.info()
+
+# 2.2 Feature pipeline
+cat_features = ['term', 'home_ownership', 'purpose']
+cat_transformer = make_pipeline(
+    OneHotEncoder(handle_unknown = "ignore"),
+    VarianceThreshold(0.0)
+)
+
+num_features = features.drop(cat_features)
+num_transformer = make_pipeline(
+    VarianceThreshold(0.0), StandardScaler()
+)
+
+logistic_model = make_pipeline(
+    ColumnTransformer([
+        ('categorical', cat_transformer, cat_features),
+        ('numeric', num_transformer, num_features)
+    ]),
+    LogisticRegression(penalty = "none", max_iter = 1000)
+)
+
+# 2.3 Model predictions
+logistic_model.fit(X_train, y_train)
+bad_loan_prob = logistic_model.predict_proba(X_test)[:, 0]
+good_loan_prob = logistic_model.predict_proba(X_test)[:, 1]
+y_pred = logistic_model.predict(X_test)
