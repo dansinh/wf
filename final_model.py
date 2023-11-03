@@ -1,4 +1,6 @@
+#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 # 0. Setup
+#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 import numpy as np
 import pandas as pd
 from datetime import datetime
@@ -10,7 +12,9 @@ from sklearn.pipeline import make_pipeline
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import jaccard_score, log_loss, recall_score, precision_score
 
+#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 # 1. Data
+#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 cols = [
     "id", "loan_amnt", "loan_status",
     "term", "int_rate", "installment", "emp_length",
@@ -83,5 +87,18 @@ df = (
         months_since_first_credit = lambda df_:
             ((pd.to_datetime('today') - df_.min_date_credit_line) / np.timedelta64(1, 'M'))
     )
+    .assign(
+        loan_income_ratio = lambda df_:
+            df_.loan_amount / df_.annual_income,
+        installment_balance_ratio = lambda df_: 
+            df_.installment / (df_.revolving_balance + 1),
+        open_account_ratio = lambda df_: df_.open_accounts / df_.total_accounts,
+        total_earnings = lambda df_: df_.employment_length * df_.annual_income
+    )
     .dropna()
 )
+
+#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+# 2. Model
+#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+df.info()
