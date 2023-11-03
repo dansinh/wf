@@ -4,7 +4,7 @@
 # 1.1 Upload packages
 pacman::p_load(
   tidyverse, tidymodels,
-  doMC, ranger, xgboost, lightgbm, probably, themis,
+  doMC, ranger, xgboost, lightgbm, bonsai, probably, themis,
   janitor, skimr, ggthemes, ggsci, gt, gtExtras
 )
 
@@ -26,15 +26,6 @@ my_theme <- function() {
     )
 }
 theme_set(my_theme())
-
-# Function to examine distributions of categorical variables
-cumu_pct <- function(data, threshold, ...) {
-  data |> count(..., sort = TRUE) |>
-    mutate(percent = 100 * n / sum(n)) |>
-    arrange(desc(percent)) |>
-    mutate(cumu_percent = cumsum(percent)) |>
-    filter(cumu_percent <= {{threshold}})
-}
 
 #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 # 2. Data
@@ -83,7 +74,11 @@ df <- read_csv("loan_data.csv") |>
     min_date_credit_line = if_else(
       min_date_credit_line >= today(), today(), min_date_credit_line
     ),
-    months_since_first_credit = interval(min_date_credit_line, today()) %/% months(1)
+    months_since_first_credit = interval(min_date_credit_line, today()) %/% months(1),
+    loan_income_ratio = loan_amount / annual_income,
+    installment_balance_ratio = installment / (revolving_balance + 1),
+    open_account_ratio = open_accounts/total_accounts,
+    total_earnings = employment_length * annual_income,
   ) |>
   select(-c(min_date_credit_line, residence_state)) |>
   mutate(across(.cols = where(is.character), .fns = factor))
@@ -106,9 +101,6 @@ df_train |>
   mutate(across(.cols = where(is.numeric), .fns = \(x) round(x, 1))) |>
   select(-Total) |>
   gt() |> gt_theme_538()
-
-# Distribution of loan purposes
-cumu_pct(data = df_train, threshold = 100, purpose)
 
 # 3.2 Recipe set
 recipe_listing <- function() {
@@ -152,10 +144,28 @@ recipe_listing <- function() {
     step_normalize(all_numeric_predictors()) |>
     step_zv(all_predictors())
   
+  generative_recipe <- recipe(
+    loan_status ~ loan_amount + purpose + term + interest_rate + installment +
+      delinquency_2years + months_since_delinquency +
+      months_since_first_credit + revolving_balance +
+      open_accounts + total_accounts +
+      annual_income + dti + employment_length + home_ownership +
+      loan_income_ratio + installment_balance_ratio +
+      open_account_ratio + total_earnings,
+    data = df_train
+  ) |>
+    step_other(purpose, other = "rest", threshold = 0.01) |>
+    step_rose(loan_status, over_ratio = 1) |>
+    step_dummy(all_nominal_predictors()) |>
+    step_novel(all_nominal_predictors()) |>
+    step_normalize(all_numeric_predictors()) |>
+    step_zv(all_predictors())
+  
   preproc <- list(
     base_recipe = base_recipe,
     mid_recipe = mid_recipe,
-    full_recipe = full_recipe
+    full_recipe = full_recipe,
+    generative_recipe = generative_recipe
   )
   return(preproc)
 }
@@ -189,7 +199,7 @@ wf_set <- workflow_set(
   cross = TRUE
 )
 
-# 3.5 Workflows evaluation
+# 3.5 Workflow evaluation
 registerDoMC(cores = detectCores())
 class_metrics <- wf_set |>
   workflow_map(
@@ -237,12 +247,14 @@ collect_metrics(class_metrics) |>
 # 4. Final Model Evaluation
 #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 # 4.1 Logistic model predictions
-full_recipe <- recipe(
+generative_recipe <- recipe(
   loan_status ~ loan_amount + purpose + term + interest_rate + installment +
     delinquency_2years + months_since_delinquency +
     months_since_first_credit + revolving_balance +
     open_accounts + total_accounts +
-    annual_income + dti + employment_length + home_ownership,
+    annual_income + dti + employment_length + home_ownership +
+    loan_income_ratio + installment_balance_ratio +
+    open_account_ratio + total_earnings,
   data = df_train
 ) |>
   step_other(purpose, other = "rest", threshold = 0.01) |>
@@ -257,107 +269,27 @@ glm_spec <- logistic_reg(penalty = 0) |>
   set_mode("classification")
 
 test_pred <- workflow() |>
-  add_recipe(full_recipe) |>
+  add_recipe(generative_recipe) |>
   add_model(glm_spec) |>
   fit(df_train) |>
   predict(df_test, type = "prob")
 
 loan_predictions <- df_test |> bind_cols(test_pred) |>
-  select(customer_id, loan_amount, loan_status, .pred_bad, .pred_good)
-
-# 4.2 Post-prediction optimization
-thresholds <- loan_predictions |>
-  threshold_perf(
-    loan_status, .pred_bad,
-    thresholds = seq(0.5, 0.75, by = 0.005)
-  )
-
-max_jindex_threshold <- thresholds |>
-  filter(.metric == "j_index") |>
-  filter(.estimate == max(.estimate)) |>
-  pull(.threshold)
-
-thresholds |>
-  ggplot(aes(x = .threshold, y = .estimate, color = .metric)) +
-  geom_line(linewidth = 1) +
-  geom_vline(
-    xintercept = max_jindex_threshold,
-    alpha = 1, color = "slateblue", linewidth = 0.8
-  ) +
-  scale_color_uchicago() +
-  labs(
-    y = "Metric estimate", x = "Threshold",
-    title = "Balance Performance by Varying Threshold"
-  )
-
-# 4.3 Final predictions
-loan_predictions <- loan_predictions |>
   mutate(
-    pred_loan_status = if_else(.pred_bad >= 0.55, "bad", "good"),
+    pred_loan_status = if_else(.pred_good >= .pred_bad, "good", "bad"),
     pred_loan_status = factor(pred_loan_status)
   )
 
-class_metrics <- metric_set(
-  j_index, sensitivity, specificity, precision, recall
-)
-loan_predictions |> class_metrics(truth = loan_status, estimate = pred_loan_status)
+# 4.3 Final predictions evaluation
+class_metrics <- metric_set(j_index, sensitivity, specificity)
+loan_predictions |>
+  class_metrics(truth = loan_status, estimate = pred_loan_status) |>
+  select(metric = .metric, estimate = .estimate) |>
+  mutate(across(where(is.numeric), \(x) round(x, 2))) |>
+  gt() |>
+  gt_theme_538()
+
 conf_mat(loan_predictions, truth = loan_status, estimate = pred_loan_status)
 
 # 4.4 Save workspace
 save.image(file = "wf_model_screening.RData")
-
-
-
-
-
-
-
-
-# How many individuals/id's: 10k distinct
-data |> summarize(n = n(), .by = id) |>
-  arrange(desc(n))
-
-# Missing data: 476 ~ 0.48% completely missing with only requested & provided
-
-# Fixed or floating interest rate: fixed
-data |> summarize(n_rate = n_distinct(int_rate), .by = id) |>
-  arrange(desc(n_rate))
-
-# Fixed or floating monthly installment: fixed
-data |> summarize(n_install = n_distinct(installment), .by = id) |>
-  arrange(desc(n_install))
-
-# Dist of term of the loan: 72.7% (36m), 22.6% (60m), 0.5% (missing)
-data |> count(term)
-
-# Distribution of emp_length: 11 categories + NA: turn into numeric
-data |> count(emp_length)
-
-# Dist of home ownership: 48% mortgage, 39% rent, 8% own, group others into mortgage
-data |> count(home_ownership) |> arrange(desc(n))
-
-# Dist of loan status: target variable (likelihood of repayment)
-# good: current (81.2%) + fully paid (9.5%)
-# problematic: in grace (0.48%)
-# bad: charged off (2.1%) + default (0.16%) + late (0.21%) + very late (1.48%)
-data |> count(loan_status)
-data |> filter(loan_status == "In Grace Period") |>
-  summary()
-
-# Purpose of the loan: 13, step_other by distribution
-data |> count(purpose)
-
-# Address state: 45
-data |> count(addr_state)
-
-# delinquency 2 years: 0-11 times
-data |> count(delinq_2yrs)
-
-# Revolving credit line/credit card balance: fixed credit line
-data |> summarize(n_line = n_distinct(revol_bal), .by = id) |>
-  arrange(desc(n_line))
-
-# Dist of loan amount: 1k - 35k, funded: 1k - 35k
-data |> summary()
-data |> filter(!is.na(term)) |> summary()
-data |> filter(!is.na(term)) |> slice_sample(n = 4) |> data.frame()
