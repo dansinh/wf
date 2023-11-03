@@ -39,7 +39,7 @@ cumu_pct <- function(data, threshold, ...) {
 #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 # 2. Data
 #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-data <- read_csv("loan_data.csv") |>
+df <- read_csv("loan_data.csv") |>
   clean_names() |>
   select(
     customer_id = id, loan_amount = loan_amnt, loan_status,
@@ -89,14 +89,12 @@ data <- read_csv("loan_data.csv") |>
   select(-c(min_date_credit_line, loan_status, residence_state)) |>
   mutate(across(.cols = where(is.character), .fns = factor))
 
-data |> skim()
-
 #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 # 3. Loan Classification Models
 #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 # 3.1 Data budgeting with case weights
 set.seed(1)
-df_split <- initial_split(data = data, prop = 0.8)
+df_split <- initial_split(data = df, prop = 0.8)
 df_train <- training(df_split) |>
   mutate(
     case_wts = ifelse(is_bad_loan == "1", 23, 1),
@@ -118,10 +116,11 @@ df_train |>
 cumu_pct(data = df_train, threshold = 100, purpose)
 
 # 3.2 Recipe set
-recipe_listing <- function(data) {
+recipe_listing <- function() {
   base_recipe <- recipe(
-    is_bad_loan ~ loan_amount + purpose + term + interest_rate + installment,
-    data = data
+    is_bad_loan ~ loan_amount + purpose + term + interest_rate + installment +
+      case_wts,
+    data = df_train
   ) |>
     step_other(purpose, threshold = 0.05) |>
     step_dummy(all_nominal_predictors()) |>
@@ -131,10 +130,11 @@ recipe_listing <- function(data) {
   
   mid_recipe <- recipe(
     is_bad_loan ~ loan_amount + purpose + term + interest_rate + installment +
+      case_wts +
       delinquency_2years + months_since_delinquency +
       months_since_first_credit + revolving_balance +
       open_accounts + total_accounts,
-    data = data
+    data = df_train
   ) |>
     step_other(purpose, threshold = 0.05) |>
     step_dummy(all_nominal_predictors()) |>
@@ -144,13 +144,14 @@ recipe_listing <- function(data) {
   
   full_recipe <- recipe(
     is_bad_loan ~ loan_amount + purpose + term + interest_rate + installment +
+      case_wts +
       delinquency_2years + months_since_delinquency +
       months_since_first_credit + revolving_balance +
       open_accounts + total_accounts +
       annual_income + dti + employment_length + home_ownership,
-    data = data
+    data = df_train
   ) |>
-    step_impute_mode(employment_length) |>
+    step_impute_mean(employment_length) |>
     step_other(purpose, threshold = 0.05) |>
     step_dummy(all_nominal_predictors()) |>
     step_novel(all_nominal_predictors()) |>
@@ -185,10 +186,10 @@ model_listing <- function() {
 
 # 3.4 Workflow set
 wf_set <- workflow_set(
-  preproc = recipe_listing(data = df_train),
+  preproc = recipe_listing(),
   models = model_listing(),
   cross = TRUE,
-  case_weights = case_weights
+  case_weights = case_wts
 )
 
 # 3.5 Workflows evaluation
