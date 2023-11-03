@@ -3,6 +3,7 @@
 #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 import numpy as np
 import pandas as pd
+import pickle
 
 from imblearn.over_sampling import SMOTENC
 from sklearn.preprocessing import StandardScaler, OneHotEncoder
@@ -121,7 +122,7 @@ def prep_data(df):
 df = prep_data(pd.read_csv("loan_data.csv"))
 
 #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-# 2. Model
+# 2. Models
 #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 # 2.1 Data budgeting
 target = 'loan_status'
@@ -174,3 +175,7 @@ target_names = ['bad', 'good']
 print(classification_report(
     y_true = y_test.values, y_pred = y_pred, target_names = target_names
 ))
+
+# 2.4 Final pickled model
+with open("logistic_model_saved.pickle", "wb") as file:
+    pickle.dump(logistic_model, file)
