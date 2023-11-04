@@ -170,7 +170,6 @@ X_train_res, y_train_res = sm.fit_resample(X_train, y_train)
 logistic_model.fit(X_train_res, y_train_res)
 y_pred = logistic_model.predict(X_test)
 ConfusionMatrixDisplay.from_estimator(logistic_model, X_test, y_test)
-plt.show()
 
 # bad = 0 (negative), good = 1 (positive)
 target_names = ['bad', 'good']
